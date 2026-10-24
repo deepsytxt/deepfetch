@@ -2573,6 +2573,7 @@ int main(int argc, char** argv) {
     };
 
     Pinned pres;
+    bool region_set = false;
     Spin spin;
     vector<Line> info = build_info(st, si, L, logo.accent);
     for (Gauge* g : gs) g->snap();
@@ -2589,16 +2590,20 @@ int main(int argc, char** argv) {
         }
         o += "\x1b[" + std::to_string(g_top + 1) + ";1H";
         o += pres.update(grid);
+        // Закрепляем блок: область прокрутки начинается под ним, поэтому вывод команд и промпт
+        // прокручиваются только ниже, а логотип и данные остаются на месте и продолжают обновляться.
+        o += "\x1b[" + std::to_string(g_top + H + 1) + ";" + std::to_string(rows) + "r";
         o += "\x1b[" + std::to_string(g_top + H + 1) + ";1H";
         o += SYNC_OFF;
         write_all(o);
+        region_set = true;
     }
     write_state(spath, H);
     signal_ready();
 
     string rowpath = spath.empty() ? "" : spath + ".row";
     if (!rowpath.empty()) unlink(rowpath.c_str());
-    const int block_end = g_top + H;
+    int block_end = g_top + H;
     auto read_row = [&](int& row, long long& stamp) {
         row = 0;
         stamp = 0;
@@ -2607,6 +2612,8 @@ int main(int argc, char** argv) {
         if (!(rf >> row >> stamp)) row = 0;
     };
     bool info_dirty = true, aborted = false, paused = false, skip_final = false;
+    bool relayout = false;
+    double last_change = 0;
     long long pause_stamp = 0;
     double t_last = now_sec(), next_sample = t_last + SAMPLE_SEC;
     double ema_work = 0.002, fps_cap = fps;
@@ -2617,8 +2624,10 @@ int main(int argc, char** argv) {
         int c2, r2;
         term_size(c2, r2);
         if (c2 != cols || r2 != rows) {
-            aborted = true;
-            break;
+            cols = c2;
+            rows = r2;
+            relayout = true;
+            last_change = now_sec();
         }
         if (g_pause && !paused) {
             g_pause = 0;
@@ -2632,12 +2641,8 @@ int main(int argc, char** argv) {
             long long stamp;
             read_row(cur, stamp);
             if (cur > 0 && stamp != pause_stamp) {
-                if (cur <= block_end) {
+                if (!relayout && cur <= block_end) {
                     aborted = true;
-                    break;
-                }
-                if (rows - cur < FREEZE_ROWS) {
-                    skip_final = true;
                     break;
                 }
                 paused = false;
@@ -2650,6 +2655,52 @@ int main(int argc, char** argv) {
                 usleep(30000);
                 continue;
             }
+        }
+        if (relayout) {
+            // Размер окна изменился: ждём, пока он перестанет меняться, и пересчитываем раскладку.
+            if (now_sec() - last_change < 0.15) {
+                usleep(20000);
+                continue;
+            }
+            Layout L2 = L;
+            int H2 = 0, nu = need_used;
+            bool ok = false;
+            for (int need : {SHELL_ROWS, FREEZE_ROWS + 1}) {
+                nu = need;
+                ok = choose_layout(st, si, scene, cols, rows, logo.accent, need, L2, H2);
+                if (ok) break;
+            }
+            if (!ok) {
+                // Слишком мало места: ничего не рисуем и возвращаем обычную прокрутку, ждём увеличения окна.
+                if (region_set) {
+                    write_all("\0337\x1b[r\0338");
+                    region_set = false;
+                }
+                usleep(100000);
+                continue;
+            }
+            L = L2;
+            H = H2;
+            need_used = nu;
+            // Позиция блока после перерисовки текста терминалом неизвестна, поэтому рисуем заново сверху.
+            g_top = 0;
+            block_end = H;
+            if (!rowpath.empty()) unlink(rowpath.c_str());
+            info = build_info(st, si, L, logo.accent);
+            compose(scene, spin.R, info, H, L, grid, canvas);
+            pres.invalidate();
+            string o = SYNC_ON + "\x1b[r\x1b[H\x1b[2J";
+            o += pres.update(grid);
+            o += "\x1b[" + std::to_string(H + 1) + ";" + std::to_string(rows) + "r";
+            o += "\x1b[" + std::to_string(H + 1) + ";1H";
+            o += SYNC_OFF;
+            write_all(o);
+            region_set = true;
+            relayout = false;
+            info_dirty = false;
+            t_last = now_sec();
+            kill(shell_pid, SIGWINCH);  // оболочка заново нарисует промпт под блоком
+            continue;
         }
         if (!foreground_ok()) {
             usleep(30000);
@@ -2670,7 +2721,6 @@ int main(int argc, char** argv) {
                     aborted = true;
                     break;
                 }
-                if (rows - cur < FREEZE_ROWS) break;
             }
         }
 
@@ -2719,6 +2769,7 @@ int main(int argc, char** argv) {
         compose(scene, identity(), info, H, L, grid, canvas);
         write_all(SYNC_ON + pres.update(grid) + SYNC_OFF);
     }
+    if (region_set && !g_write_failed) write_all("\0337\x1b[r\0338");
     if (!rowpath.empty()) unlink(rowpath.c_str());
     remove_state(spath);
     smp.shutdown();
