@@ -2305,6 +2305,8 @@ static int print_init(const string& sh) {
 }
 
 
+static int g_cpr_col = 0;
+
 static int query_cursor_row() {
     int tfd = open("/dev/tty", O_RDWR | O_NOCTTY);
     int rfd = tfd, wfd = tfd;
@@ -2339,6 +2341,7 @@ static int query_cursor_row() {
         int r = 0, c = 0;
         if (e != string::npos && b != string::npos && sscanf(buf.c_str() + b + 2, "%d;%d", &r, &c) == 2) {
             row = r;
+            g_cpr_col = c;
             break;
         }
     }
@@ -2403,7 +2406,7 @@ int main(int argc, char** argv) {
                 int pr = query_cursor_row();
                 if (pr > 0 && !sp.empty()) {
                     std::ofstream f(sp + ".pre", std::ios::trunc);
-                    f << pr << " " << (long long)(now_sec() * 1e6) << "\n";
+                    f << pr << " " << g_cpr_col << " " << (long long)(now_sec() * 1e6) << "\n";
                 }
                 kill(p, SIGUSR1);
                 for (int i = 0; i < 100 && is_ours(p) && !(sp.empty() ? false : state_paused(sp)); i++) usleep(5000);
@@ -2632,13 +2635,14 @@ int main(int argc, char** argv) {
     auto read_pre = [&]() {
         if (prepath.empty()) return;
         std::ifstream pf(prepath);
-        int pr = 0;
+        int pr = 0, pc = 0;
         long long ps = 0;
-        if (!(pf >> pr >> ps) || ps == last_pre_stamp) return;
+        if (!(pf >> pr >> pc >> ps) || ps == last_pre_stamp) return;
         last_pre_stamp = ps;
         // Курсор не упирался в низ, значит разница строк — настоящая высота промпта.
+        // Если курсор уже в первой колонке, оболочка успела перевести строку после Enter — вычитаем её.
         if (pr > 0 && pr < rows && last_prompt_row > 0 && pr >= last_prompt_row)
-            prompt_extra = std::min(6, pr - last_prompt_row);
+            prompt_extra = std::max(0, std::min(6, pr - last_prompt_row - (pc == 1 ? 1 : 0)));
     };
     auto scroll_risk = [&](int cur) { return !pinned && cur + prompt_extra > rows; };
     auto read_row = [&](int& row, long long& stamp) {
