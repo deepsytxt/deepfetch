@@ -2618,6 +2618,9 @@ int main(int argc, char** argv) {
         if (!(rf >> row >> stamp)) row = 0;
     };
     bool info_dirty = true, aborted = false, paused = false, skip_final = false;
+    // Блок ушёл за экран (позиция неизвестна): живём дальше, продолжаем вращение и обновление
+    // данных, но в терминал больше ничего не пишем, чтобы не портить вывод.
+    bool offscreen = false;
     bool relayout = false;
     double last_change = 0;
     long long pause_stamp = 0;
@@ -2634,6 +2637,26 @@ int main(int argc, char** argv) {
             rows = r2;
             relayout = true;
             last_change = now_sec();
+        }
+        if (offscreen) {
+            g_pause = 0;
+            double t = now_sec();
+            double dt = std::min(0.25, t - t_last);
+            t_last = t;
+            spin.step(dt);
+            for (Gauge* g : gs) g->step(dt);
+            if (t >= next_sample) {
+                smp.sample();
+                st.pulse = !st.pulse;
+                next_sample = t + SAMPLE_BG_SEC;
+                if (!state_owned(spath)) {
+                    aborted = true;
+                    break;
+                }
+            }
+            relayout = false;
+            usleep(100000);
+            continue;
         }
         if (g_pause && !paused) {
             g_pause = 0;
@@ -2654,8 +2677,9 @@ int main(int argc, char** argv) {
                 if (!pinned && cur > rows - PROMPT_MARGIN) {
                     // Экран мог прокрутиться: где теперь блок, терминал не сообщает.
                     // Рисовать по старым координатам нельзя, блок остаётся в истории как есть.
-                    aborted = true;
-                    break;
+                    offscreen = true;
+                    write_state(spath, H, 0);
+                    continue;
                 }
                 paused = false;
                 g_pause = 0;
@@ -2669,8 +2693,8 @@ int main(int argc, char** argv) {
             }
         }
         if (relayout && !pinned) {
-            aborted = true;  // текст переложился, позиция блока неизвестна
-            break;
+            offscreen = true;  // текст переложился, позиция блока неизвестна
+            continue;
         }
         if (relayout) {
             // Размер окна изменился: ждём, пока он перестанет меняться, и пересчитываем раскладку.
@@ -2733,9 +2757,13 @@ int main(int argc, char** argv) {
             long long stamp;
             read_row(cur, stamp);
             if (cur > 0) {
-                if (cur <= block_end || (!pinned && cur > rows - PROMPT_MARGIN)) {
+                if (cur <= block_end) {
                     aborted = true;
                     break;
+                }
+                if (!pinned && cur > rows - PROMPT_MARGIN) {
+                    offscreen = true;
+                    continue;
                 }
             }
         }
@@ -2779,7 +2807,7 @@ int main(int argc, char** argv) {
         if (wait > 0) usleep((useconds_t)(wait * 1e6));
     }
 
-    if (!aborted && !skip_final && !paused && !g_write_failed) {
+    if (!aborted && !skip_final && !paused && !offscreen && !g_write_failed) {
         for (Gauge* g : gs) g->snap();
         info = build_info(st, si, L, logo.accent);
         compose(scene, identity(), info, H, L, grid, canvas);
