@@ -772,15 +772,6 @@ static float glyph_ink(char32_t c) {
 struct RGBf {
     int r, g, b;
 };
-static RGBf color_rgb(const Color& c);
-static RGBf gfx_rgb(const Color& c) {
-    static const int P[16][3] = {{40, 42, 54},    {255, 85, 85},   {80, 220, 120},  {240, 220, 110},
-                                 {98, 148, 255},  {255, 121, 198}, {110, 220, 240}, {215, 218, 228},
-                                 {110, 114, 130}, {255, 130, 130}, {130, 255, 160}, {255, 245, 150},
-                                 {140, 180, 255}, {255, 160, 220}, {160, 240, 255}, {255, 255, 255}};
-    if (c.k == 1) return {P[c.a & 15][0], P[c.a & 15][1], P[c.a & 15][2]};
-    return color_rgb(c);
-}
 static RGBf color_rgb(const Color& c) {
     int r = 208, g = 208, b = 208;
     if (c.k == 1) { r = PAL16[c.a & 15][0]; g = PAL16[c.a & 15][1]; b = PAL16[c.a & 15][2]; }
@@ -1908,17 +1899,17 @@ static vector<Line> build_info(const Stats& s, const StaticInfo& si, const Layou
 }
 
 static void compose(const Scene& sc, const Mat3& R, const vector<Line>& info, int frameH, const Layout& L, Grid& g,
-                    Grid& canvas, bool skip_logo = false) {
+                    Grid& canvas) {
     int W = sc.CW + GAP + L.panelw;
     if (g.w != W || g.h != frameH) g = Grid(W, frameH);
     else std::fill(g.c.begin(), g.c.end(), Cell());
     if (canvas.w != sc.CW || canvas.h != sc.CH) canvas = Grid(sc.CW, sc.CH);
-    if (!skip_logo) sc.canvas(R, canvas);
+    sc.canvas(R, canvas);
     int logo_off = (frameH - sc.CH) / 2;
     int info_off = (frameH - (int)info.size()) / 2;
     for (int r = 0; r < frameH; r++) {
         int ci = r - logo_off, ii = r - info_off;
-        if (!skip_logo && ci >= 0 && ci < sc.CH)
+        if (ci >= 0 && ci < sc.CH)
             for (int x = 0; x < sc.CW; x++) g.at(x, r) = canvas.at(x, ci);
         if (ii >= 0 && ii < (int)info.size()) {
             Cell d;
@@ -1961,471 +1952,6 @@ static void term_size(int& cols, int& rows) {
         rows = 24;
     }
 }
-
-namespace kg {
-
-static const uint8_t FONT[95][5] = {
-    {0x00, 0x00, 0x00, 0x00, 0x00}, {0x00, 0x00, 0x5F, 0x00, 0x00}, {0x00, 0x07, 0x00, 0x07, 0x00},
-    {0x14, 0x7F, 0x14, 0x7F, 0x14}, {0x24, 0x2A, 0x7F, 0x2A, 0x12}, {0x23, 0x13, 0x08, 0x64, 0x62},
-    {0x36, 0x49, 0x56, 0x20, 0x50}, {0x00, 0x05, 0x03, 0x00, 0x00}, {0x00, 0x1C, 0x22, 0x41, 0x00},
-    {0x00, 0x41, 0x22, 0x1C, 0x00}, {0x14, 0x08, 0x3E, 0x08, 0x14}, {0x08, 0x08, 0x3E, 0x08, 0x08},
-    {0x00, 0x50, 0x30, 0x00, 0x00}, {0x08, 0x08, 0x08, 0x08, 0x08}, {0x00, 0x60, 0x60, 0x00, 0x00},
-    {0x20, 0x10, 0x08, 0x04, 0x02}, {0x3E, 0x51, 0x49, 0x45, 0x3E}, {0x00, 0x42, 0x7F, 0x40, 0x00},
-    {0x42, 0x61, 0x51, 0x49, 0x46}, {0x21, 0x41, 0x45, 0x4B, 0x31}, {0x18, 0x14, 0x12, 0x7F, 0x10},
-    {0x27, 0x45, 0x45, 0x45, 0x39}, {0x3C, 0x4A, 0x49, 0x49, 0x30}, {0x01, 0x71, 0x09, 0x05, 0x03},
-    {0x36, 0x49, 0x49, 0x49, 0x36}, {0x06, 0x49, 0x49, 0x29, 0x1E}, {0x00, 0x36, 0x36, 0x00, 0x00},
-    {0x00, 0x56, 0x36, 0x00, 0x00}, {0x08, 0x14, 0x22, 0x41, 0x00}, {0x14, 0x14, 0x14, 0x14, 0x14},
-    {0x00, 0x41, 0x22, 0x14, 0x08}, {0x02, 0x01, 0x51, 0x09, 0x06}, {0x32, 0x49, 0x79, 0x41, 0x3E},
-    {0x7E, 0x11, 0x11, 0x11, 0x7E}, {0x7F, 0x49, 0x49, 0x49, 0x36}, {0x3E, 0x41, 0x41, 0x41, 0x22},
-    {0x7F, 0x41, 0x41, 0x22, 0x1C}, {0x7F, 0x49, 0x49, 0x49, 0x41}, {0x7F, 0x09, 0x09, 0x09, 0x01},
-    {0x3E, 0x41, 0x49, 0x49, 0x7A}, {0x7F, 0x08, 0x08, 0x08, 0x7F}, {0x00, 0x41, 0x7F, 0x41, 0x00},
-    {0x20, 0x40, 0x41, 0x3F, 0x01}, {0x7F, 0x08, 0x14, 0x22, 0x41}, {0x7F, 0x40, 0x40, 0x40, 0x40},
-    {0x7F, 0x02, 0x0C, 0x02, 0x7F}, {0x7F, 0x04, 0x08, 0x10, 0x7F}, {0x3E, 0x41, 0x41, 0x41, 0x3E},
-    {0x7F, 0x09, 0x09, 0x09, 0x06}, {0x3E, 0x41, 0x51, 0x21, 0x5E}, {0x7F, 0x09, 0x19, 0x29, 0x46},
-    {0x46, 0x49, 0x49, 0x49, 0x31}, {0x01, 0x01, 0x7F, 0x01, 0x01}, {0x3F, 0x40, 0x40, 0x40, 0x3F},
-    {0x1F, 0x20, 0x40, 0x20, 0x1F}, {0x3F, 0x40, 0x38, 0x40, 0x3F}, {0x63, 0x14, 0x08, 0x14, 0x63},
-    {0x07, 0x08, 0x70, 0x08, 0x07}, {0x61, 0x51, 0x49, 0x45, 0x43}, {0x00, 0x7F, 0x41, 0x41, 0x00},
-    {0x02, 0x04, 0x08, 0x10, 0x20}, {0x00, 0x41, 0x41, 0x7F, 0x00}, {0x04, 0x02, 0x01, 0x02, 0x04},
-    {0x40, 0x40, 0x40, 0x40, 0x40}, {0x00, 0x01, 0x02, 0x04, 0x00}, {0x20, 0x54, 0x54, 0x54, 0x78},
-    {0x7F, 0x48, 0x44, 0x44, 0x38}, {0x38, 0x44, 0x44, 0x44, 0x20}, {0x38, 0x44, 0x44, 0x48, 0x7F},
-    {0x38, 0x54, 0x54, 0x54, 0x18}, {0x08, 0x7E, 0x09, 0x01, 0x02}, {0x08, 0x14, 0x54, 0x54, 0x3C},
-    {0x7F, 0x08, 0x04, 0x04, 0x78}, {0x00, 0x44, 0x7D, 0x40, 0x00}, {0x20, 0x40, 0x44, 0x3D, 0x00},
-    {0x00, 0x7F, 0x10, 0x28, 0x44}, {0x00, 0x41, 0x7F, 0x40, 0x00}, {0x7C, 0x04, 0x18, 0x04, 0x78},
-    {0x7C, 0x08, 0x04, 0x04, 0x78}, {0x38, 0x44, 0x44, 0x44, 0x38}, {0x7C, 0x14, 0x14, 0x14, 0x08},
-    {0x08, 0x14, 0x14, 0x18, 0x7C}, {0x7C, 0x08, 0x04, 0x04, 0x08}, {0x48, 0x54, 0x54, 0x54, 0x20},
-    {0x04, 0x3F, 0x44, 0x40, 0x20}, {0x3C, 0x40, 0x40, 0x20, 0x7C}, {0x1C, 0x20, 0x40, 0x20, 0x1C},
-    {0x3C, 0x40, 0x30, 0x40, 0x3C}, {0x44, 0x28, 0x10, 0x28, 0x44}, {0x0C, 0x50, 0x50, 0x50, 0x3C},
-    {0x44, 0x64, 0x54, 0x4C, 0x44}, {0x00, 0x08, 0x36, 0x41, 0x00}, {0x00, 0x00, 0x7F, 0x00, 0x00},
-    {0x00, 0x41, 0x36, 0x08, 0x00}, {0x02, 0x01, 0x02, 0x04, 0x02}};
-
-static constexpr int KLAYERS = 6;
-static constexpr double KDEPTH = 0.04;
-static constexpr int KSS = 2;
-static constexpr double PX_MAX = 300000.0;
-static constexpr int DEFAULT_FRAMES = 80;
-
-typedef int (*Compress2Fn)(unsigned char*, unsigned long*, const unsigned char*, unsigned long, int);
-typedef unsigned long (*BoundFn)(unsigned long);
-static Compress2Fn g_compress = nullptr;
-static BoundFn g_bound = nullptr;
-
-static bool load_zlib() {
-    if (g_compress && g_bound) return true;
-    void* lib = dlopen("libz.so.1", RTLD_LAZY);
-    if (!lib) lib = dlopen("libz.so", RTLD_LAZY);
-    if (!lib) return false;
-    g_compress = reinterpret_cast<Compress2Fn>(dlsym(lib, "compress2"));
-    g_bound = reinterpret_cast<BoundFn>(dlsym(lib, "compressBound"));
-    return g_compress && g_bound;
-}
-
-static string b64(const string& in) {
-    static const char T[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    string o;
-    o.reserve((in.size() + 2) / 3 * 4);
-    auto B = [&](size_t i) { return (uint32_t)(uint8_t)in[i]; };
-    size_t i = 0;
-    for (; i + 2 < in.size(); i += 3) {
-        uint32_t v = (B(i) << 16) | (B(i + 1) << 8) | B(i + 2);
-        o += T[v >> 18];
-        o += T[(v >> 12) & 63];
-        o += T[(v >> 6) & 63];
-        o += T[v & 63];
-    }
-    if (i + 1 == in.size()) {
-        uint32_t v = B(i) << 16;
-        o += T[v >> 18];
-        o += T[(v >> 12) & 63];
-        o += "==";
-    } else if (i + 2 == in.size()) {
-        uint32_t v = (B(i) << 16) | (B(i + 1) << 8);
-        o += T[v >> 18];
-        o += T[(v >> 12) & 63];
-        o += T[(v >> 6) & 63];
-        o += '=';
-    }
-    return o;
-}
-
-static string apc(const string& ctrl, const string& payload) {
-    string b = b64(payload), o;
-    size_t off = 0;
-    bool first = true;
-    do {
-        size_t n = std::min<size_t>(4096, b.size() - off);
-        bool more = off + n < b.size();
-        o += "\x1b_G";
-        if (first) o += ctrl + ",";
-        o += more ? "m=1" : "m=0";
-        o += ';';
-        o.append(b, off, n);
-        o += "\x1b\\";
-        off += n;
-        first = false;
-    } while (off < b.size());
-    return o;
-}
-
-static float sstep(float a, float b, float x) {
-    float t = clamp01((x - a) / (b - a));
-    return t * t * (3 - 2 * t);
-}
-
-static float glyph_alpha(char32_t c, int x, int y, int cw, int ch) {
-    float fx = (x + 0.5f) / cw, fy = (y + 0.5f) / ch;
-    if (c == U' ') return 0;
-    if (c >= 0x2800 && c <= 0x28FF) {
-        static const int bit_col[8] = {0, 0, 0, 1, 1, 1, 0, 1};
-        static const int bit_row[8] = {0, 1, 2, 0, 1, 2, 3, 3};
-        float rad = std::min(cw / 4.0f, ch / 8.0f) * 0.62f, best = 0;
-        for (int b = 0; b < 8; b++) {
-            if (!((c - 0x2800) & (1u << b))) continue;
-            float dx = x + 0.5f - (bit_col[b] + 0.5f) * cw / 2.0f, dy = y + 0.5f - (bit_row[b] + 0.5f) * ch / 4.0f;
-            best = std::max(best, clamp01(rad + 0.5f - std::sqrt(dx * dx + dy * dy)));
-        }
-        return best;
-    }
-    switch (c) {
-        case U'█': return 1;
-        case U'▀': return fy < 0.5f ? 1.f : 0.f;
-        case U'▄': return fy >= 0.5f ? 1.f : 0.f;
-        case U'▌': return fx < 0.5f ? 1.f : 0.f;
-        case U'▐': return fx >= 0.5f ? 1.f : 0.f;
-        case U'░': return 0.25f;
-        case U'▒': return 0.5f;
-        case U'▓': return 0.75f;
-        default: break;
-    }
-    if (c >= 0x2581 && c <= 0x2587) return fy >= 1.0f - (float)(c - 0x2580) / 8.0f ? 1.f : 0.f;
-    if (c >= 0x2589 && c <= 0x258F) return fx < (float)(0x2590 - c) / 8.0f ? 1.f : 0.f;
-    if (c >= 33 && c <= 126) {
-        const uint8_t* g = FONT[c - 32];
-        float u = (fx - 0.08f) / 0.84f * 5.f - 0.5f, v = (fy - 0.10f) / 0.80f * 7.f - 0.5f;
-        auto bit = [&](int i, int j) -> float {
-            if (i < 0 || i >= 5 || j < 0 || j >= 7) return 0.f;
-            return (float)((g[i] >> j) & 1);
-        };
-        int i0 = (int)std::floor(u), j0 = (int)std::floor(v);
-        float du = u - i0, dv = v - j0;
-        float val = bit(i0, j0) * (1 - du) * (1 - dv) + bit(i0 + 1, j0) * du * (1 - dv) +
-                    bit(i0, j0 + 1) * (1 - du) * dv + bit(i0 + 1, j0 + 1) * du * dv;
-        return sstep(0.1f, 0.5f, val);
-    }
-    float dx = (fx - 0.5f) * cw, dy = (fy - 0.5f) * ch;
-    float rad = std::min(cw, ch) * 0.35f;
-    return clamp01(rad + 0.5f - std::sqrt(dx * dx + dy * dy)) * std::max(0.4f, glyph_ink(c));
-}
-
-struct Tex {
-    int w = 0, h = 0;
-    vector<float> p;
-};
-
-static Tex build_tex(const Scene& sc, int cw, int ch) {
-    Tex t;
-    t.w = sc.W * cw;
-    t.h = sc.H * ch;
-    t.p.assign((size_t)t.w * t.h * 4, 0.f);
-    for (int r = 0; r < sc.H; r++)
-        for (int c = 0; c < sc.W; c++) {
-            const Cell& cell = sc.logo.rows[r][c];
-            bool has_bg = cell.bg != Color();
-            if (cell.ch == U' ' && !has_bg) continue;
-            RGBf f = gfx_rgb(cell.fg), b = gfx_rgb(cell.bg);
-            for (int y = 0; y < ch; y++)
-                for (int x = 0; x < cw; x++) {
-                    float a = glyph_alpha(cell.ch, x, y, cw, ch);
-                    float R, G, B, A;
-                    if (has_bg) {
-                        R = f.r * a + b.r * (1 - a);
-                        G = f.g * a + b.g * (1 - a);
-                        B = f.b * a + b.b * (1 - a);
-                        A = 1;
-                    } else {
-                        R = f.r * a;
-                        G = f.g * a;
-                        B = f.b * a;
-                        A = a;
-                    }
-                    float* q = &t.p[(((size_t)(r * ch + y)) * t.w + (c * cw + x)) * 4];
-                    q[0] = R;
-                    q[1] = G;
-                    q[2] = B;
-                    q[3] = A;
-                }
-        }
-    return t;
-}
-
-static void render(const Scene& sc, const Tex& tx, int cw, int chh, const Mat3& R, uint8_t* out) {
-    const int fw = sc.CW * cw, fh = sc.CH * chh;
-    const double D = sc.D, KT = KDEPTH * sc.W, S = D / (D - KT / 2), halfW = sc.W / 2.0, halfH = sc.H / 2.0;
-    double zl[KLAYERS];
-    for (int i = 0; i < KLAYERS; i++) zl[i] = KT / 2 - KT * i / (KLAYERS - 1);
-    const double nx = R.m[0][2], ny = R.m[1][2], nz = R.m[2][2];
-    const bool back = nz < 0;
-    const double nzD = nz * D;
-    const int faceL = back ? KLAYERS - 1 : 0;
-    const double Lx = -0.35, Ly = -0.45, Lz = 0.82;
-    double vs = back ? -1.0 : 1.0;
-    double lit = std::max(0.0, std::min(1.0, vs * (nx * Lx + ny * Ly + nz * Lz) / Lz));
-    float faceB = (float)(AMBIENT + (1.0 - AMBIENT) * lit);
-    if (back) faceB *= 0.85f;
-    float sideB = (float)(0.52 + 0.12 * lit);
-
-    struct Hit {
-        double t;
-        float a, r, g, b;
-    };
-    std::memset(out, 0, (size_t)fw * fh * 4);
-    int bx0 = fw, by0 = fh, bx1 = -1, by1 = -1;
-    for (int cx = 0; cx < 2; cx++)
-        for (int cy = 0; cy < 2; cy++)
-            for (int cz = 0; cz < 2; cz++) {
-                double l0 = (cx ? 1 : -1) * halfW, l1 = (cy ? 1 : -1) * (double)sc.H, l2 = (cz ? 1 : -1) * S * KT / 2;
-                double x = (R.m[0][0] * l0 + R.m[0][1] * l1 + R.m[0][2] * l2) / S;
-                double y = (R.m[1][0] * l0 + R.m[1][1] * l1 + R.m[1][2] * l2) / S;
-                double z = (R.m[2][0] * l0 + R.m[2][1] * l1 + R.m[2][2] * l2) / S;
-                double dd = D - z;
-                if (dd < D * 0.2) dd = D * 0.2;
-                double px0 = x * D / dd, py0 = y * D / dd;
-                int X = (int)std::lround((px0 + sc.CW / 2.0) * cw), Y = (int)std::lround((py0 / 2 + sc.CH / 2.0) * chh);
-                bx0 = std::min(bx0, X);
-                bx1 = std::max(bx1, X);
-                by0 = std::min(by0, Y);
-                by1 = std::max(by1, Y);
-            }
-    bx0 = std::max(0, bx0 - 3);
-    by0 = std::max(0, by0 - 3);
-    bx1 = std::min(fw - 1, bx1 + 3);
-    by1 = std::min(fh - 1, by1 + 3);
-    for (int Y = by0; Y <= by1; Y++) {
-        for (int X = bx0; X <= bx1; X++) {
-            float sumA = 0, sr = 0, sg = 0, sb = 0;
-            for (int j = 0; j < KSS; j++) {
-                double py0 = ((Y + (j + 0.5) / KSS) / chh - sc.CH / 2.0) * 2;
-                for (int i = 0; i < KSS; i++) {
-                    double px0 = (X + (i + 0.5) / KSS) / cw - sc.CW / 2.0;
-                    double den = nzD - nx * px0 - ny * py0;
-                    if (std::fabs(den) < 1e-6) continue;
-                    Hit hs[KLAYERS];
-                    int nh = 0;
-                    for (int l = 0; l < KLAYERS; l++) {
-                        double t = (nzD - zl[l]) / den;
-                        if (t <= 0) continue;
-                        double px = t * px0, py = t * py0, pz = D * (1 - t);
-                        double lx = S * (R.m[0][0] * px + R.m[1][0] * py + R.m[2][0] * pz);
-                        double ly = S * (R.m[0][1] * px + R.m[1][1] * py + R.m[2][1] * pz);
-                        double u = (lx + halfW) * cw - 0.5, v = (ly / 2 + halfH) * chh - 0.5;
-                        if (u < -0.5 || v < -0.5 || u >= tx.w - 0.5 || v >= tx.h - 0.5) continue;
-                        int u0 = (int)std::floor(u), v0 = (int)std::floor(v);
-                        float fu = (float)(u - u0), fv = (float)(v - v0);
-                        int u1 = std::min(tx.w - 1, u0 + 1), v1 = std::min(tx.h - 1, v0 + 1);
-                        u0 = std::max(0, u0);
-                        v0 = std::max(0, v0);
-                        const float* p00 = &tx.p[((size_t)v0 * tx.w + u0) * 4];
-                        const float* p10 = &tx.p[((size_t)v0 * tx.w + u1) * 4];
-                        const float* p01 = &tx.p[((size_t)v1 * tx.w + u0) * 4];
-                        const float* p11 = &tx.p[((size_t)v1 * tx.w + u1) * 4];
-                        float w00 = (1 - fu) * (1 - fv), w10 = fu * (1 - fv), w01 = (1 - fu) * fv, w11 = fu * fv;
-                        float pr = p00[0] * w00 + p10[0] * w10 + p01[0] * w01 + p11[0] * w11;
-                        float pg = p00[1] * w00 + p10[1] * w10 + p01[1] * w01 + p11[1] * w11;
-                        float pb = p00[2] * w00 + p10[2] * w10 + p01[2] * w01 + p11[2] * w11;
-                        float a = p00[3] * w00 + p10[3] * w10 + p01[3] * w01 + p11[3] * w11;
-                        if (a < 0.02f) continue;
-                        float b = (l == faceL) ? faceB : sideB * (1.0f - 0.09f * (float)std::abs(l - faceL));
-                        b *= (float)std::max(0.55, std::min(1.0, 1.0 - 0.9 * (t - 1.0)));
-                        float k = b / a;
-                        Hit h{t, a, pr * k, pg * k, pb * k};
-                        int pos = nh++;
-                        while (pos > 0 && hs[pos - 1].t > h.t) {
-                            hs[pos] = hs[pos - 1];
-                            pos--;
-                        }
-                        hs[pos] = h;
-                    }
-                    float acc = 0, cr = 0, cg = 0, cb = 0;
-                    for (int h = 0; h < nh; h++) {
-                        if (hs[h].a > acc) {
-                            float w = hs[h].a - acc;
-                            cr += w * hs[h].r;
-                            cg += w * hs[h].g;
-                            cb += w * hs[h].b;
-                            acc = hs[h].a;
-                        }
-                    }
-                    if (acc > 0) {
-                        sumA += acc;
-                        sr += cr;
-                        sg += cg;
-                        sb += cb;
-                    }
-                }
-            }
-            uint8_t* o = out + ((size_t)Y * fw + X) * 4;
-            if (sumA <= 0.0005f) {
-                o[0] = o[1] = o[2] = o[3] = 0;
-                continue;
-            }
-            auto cl = [](float v) { return (uint8_t)std::max(0.f, std::min(255.f, v + 0.5f)); };
-            o[0] = cl(sr / sumA);
-            o[1] = cl(sg / sumA);
-            o[2] = cl(sb / sumA);
-            o[3] = cl(sumA / (KSS * KSS) * 255.0f);
-        }
-    }
-}
-
-static Mat3 pose(double u) {
-    const double TAU = 2 * M_PI;
-    auto sm = [](double x) {
-        x = x < 0 ? 0 : (x > 1 ? 1 : x);
-        return x * x * (3 - 2 * x);
-    };
-    double yaw = 2 * TAU * (u + 0.07 * std::sin(2 * TAU * u + 0.8));
-    double pitch = 0.36 * std::sin(TAU * u + 0.7) + 0.13 * std::sin(3 * TAU * u + 2.0);
-    double roll = 0.14 * std::sin(2 * TAU * u + 4.0) + 0.05 * std::sin(3 * TAU * u);
-    double extra = 0;
-    if (u > 0.62 && u < 0.88) extra = TAU * sm((u - 0.62) / 0.26);
-    else if (u >= 0.88) extra = TAU;
-    Mat3 base = mul(rotZ(roll), mul(rotX(pitch), rotY(yaw)));
-    return orthonormalize(mul(rotX(extra), base));
-}
-
-static vector<string> build(const Scene& sc, int cw0, int ch0, int N, int& fw, int& fh) {
-    if (!load_zlib() || N < 2) return {};
-    double s = 1.0, px = (double)sc.CW * cw0 * sc.CH * ch0;
-    if (px > PX_MAX) s = std::sqrt(PX_MAX / px);
-    int cw = std::max(5, (int)(cw0 * s)), chh = std::max(10, (int)(ch0 * s));
-    fw = sc.CW * cw;
-    fh = sc.CH * chh;
-    Tex tx = build_tex(sc, cw, chh);
-    vector<string> out((size_t)N);
-    std::atomic<int> next{0};
-    auto work = [&]() {
-        vector<uint8_t> buf((size_t)fw * fh * 4);
-        vector<uint8_t> zb(g_bound(buf.size()));
-        for (;;) {
-            int k = next++;
-            if (k >= N) break;
-            render(sc, tx, cw, chh, pose((double)k / N), buf.data());
-            unsigned long zl = zb.size();
-            if (g_compress(zb.data(), &zl, buf.data(), buf.size(), 1) != 0) continue;
-            out[(size_t)k].assign((const char*)zb.data(), zl);
-        }
-    };
-    int nt = std::max(1, std::min(8, (int)std::thread::hardware_concurrency()));
-    vector<std::thread> th;
-    for (int i = 1; i < nt; i++) th.emplace_back(work);
-    work();
-    for (auto& t : th) t.join();
-    for (auto& f : out)
-        if (f.empty()) return {};
-    return out;
-}
-
-struct Probe {
-    bool ok = false;
-    int cw = 10, ch = 20;
-};
-
-static bool hinted() {
-    return env_or("TERM") == "xterm-kitty" || !env_or("KITTY_WINDOW_ID").empty();
-}
-
-static Probe probe() {
-    Probe p;
-    string pf = env_or("DEEPFETCH_GRAPHICS");
-    if (pf == "0" || !isatty(0) || !isatty(1)) return p;
-    bool force = pf == "1";
-    if (!hinted() && !force) return p;
-    if (!force && (!env_or("TMUX").empty() || !env_or("STY").empty())) return p;
-    if (!load_zlib()) return p;
-    winsize ws{};
-    int cw = 0, ch = 0;
-    if (ioctl(1, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0 && ws.ws_row > 0 && ws.ws_xpixel > 0 && ws.ws_ypixel > 0) {
-        cw = ws.ws_xpixel / ws.ws_col;
-        ch = ws.ws_ypixel / ws.ws_row;
-    }
-    termios old{};
-    if (tcgetattr(0, &old) != 0) return p;
-    termios raw = old;
-    raw.c_lflag &= ~(tcflag_t)(ICANON | ECHO);
-    raw.c_cc[VMIN] = 0;
-    raw.c_cc[VTIME] = 0;
-    if (tcsetattr(0, TCSANOW, &raw) != 0) return p;
-    const string q = "\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[16t\x1b[c";
-    ssize_t w = write(1, q.data(), q.size());
-    (void)w;
-    string buf;
-    double end = now_sec() + 0.6;
-    bool got_da = false;
-    while (now_sec() < end && !got_da) {
-        pollfd pf2{0, POLLIN, 0};
-        if (poll(&pf2, 1, 50) <= 0) continue;
-        char tmp[256];
-        ssize_t n = read(0, tmp, sizeof tmp);
-        if (n <= 0) break;
-        buf.append(tmp, (size_t)n);
-        size_t a = buf.find("\x1b[?");
-        if (a != string::npos && buf.find('c', a) != string::npos) got_da = true;
-    }
-    tcsetattr(0, TCSANOW, &old);
-    bool gfx = buf.find("_Gi=31;OK") != string::npos;
-    size_t t = buf.find("\x1b[6;");
-    if (t != string::npos) {
-        int hh = 0, ww = 0;
-        if (sscanf(buf.c_str() + t + 4, "%d;%d", &hh, &ww) == 2 && hh > 0 && ww > 0) {
-            cw = ww;
-            ch = hh;
-        }
-    }
-    p.ok = gfx || force;
-    if (cw > 0 && ch > 0) {
-        p.cw = cw;
-        p.ch = ch;
-    }
-    return p;
-}
-
-static void upload(const vector<string>& fr, int fw, int fh, unsigned id, int gap_ms) {
-    char c[200];
-    for (size_t k = 0; k < fr.size(); k++) {
-        if (k == 0) snprintf(c, sizeof c, "a=t,f=32,o=z,s=%d,v=%d,i=%u,q=2", fw, fh, id);
-        else snprintf(c, sizeof c, "a=f,f=32,o=z,s=%d,v=%d,i=%u,z=%d,X=1,q=2", fw, fh, id, gap_ms);
-        write_all(apc(c, fr[k]));
-    }
-    string s;
-    snprintf(c, sizeof c, "\x1b_Ga=a,i=%u,r=1,z=%d,q=2\x1b\\", id, gap_ms);
-    s += c;
-    snprintf(c, sizeof c, "\x1b_Ga=a,i=%u,s=3,v=1,q=2\x1b\\", id);
-    s += c;
-    write_all(s);
-}
-
-static string place_cmd(unsigned id, int cols, int rows) {
-    char c[160];
-    snprintf(c, sizeof c, "\x1b_Ga=p,i=%u,p=1,c=%d,r=%d,C=1,z=-1,q=2\x1b\\", id, cols, rows);
-    return c;
-}
-
-static string place_at(unsigned id, int cols, int rows, int row1, int col1) {
-    return "\x1b[" + std::to_string(row1) + ";" + std::to_string(col1) + "H" + place_cmd(id, cols, rows);
-}
-
-static string place_rel(unsigned id, int cols, int rows, int block_h, int logo_off) {
-    string s = "\r\x1b[" + std::to_string(block_h) + "A";
-    if (logo_off > 0) s += "\x1b[" + std::to_string(logo_off) + "B";
-    s += place_cmd(id, cols, rows);
-    s += "\x1b[" + std::to_string(block_h - logo_off) + "B\r";
-    return s;
-}
-
-static unsigned new_id() {
-    return (unsigned)(((uint64_t)(now_sec() * 1000.0) ^ ((uint64_t)getpid() << 8)) % 2000000000ull) + 1u;
-}
-
-}  // namespace kg
 
 static string state_path() {
     const char* tn = nullptr;
@@ -2676,8 +2202,7 @@ static void usage() {
          "  deepfetch --init SHELL    код интеграции для fish, bash или zsh\n"
          "  deepfetch --help          справка\n"
          "\n"
-         "Переменные: DEEPFETCH_FPS (4-30), FFSPIN_ASCII, FFSPIN_COLORS,\n"
-         "            DEEPFETCH_GRAPHICS (0 выключить, 1 включить графику kitty), DEEPFETCH_FRAMES (24-240)");
+         "Переменные: DEEPFETCH_FPS (4-30), FFSPIN_ASCII, FFSPIN_COLORS");
 }
 
 static int print_init(const string& sh) {
@@ -2817,10 +2342,7 @@ int main(int argc, char** argv) {
             wait_exit(p);
         }
         if (arg == "--release") return 0;
-        if (arg == "--clear") {
-            if (kg::hinted() || env_or("DEEPFETCH_GRAPHICS") == "1") printf("\x1b_Ga=d,d=A,q=2\x1b\\");
-            printf("\x1b[r\x1b[H\x1b[2J\x1b[3J");
-        }
+        if (arg == "--clear") printf("\x1b[r\x1b[H\x1b[2J\x1b[3J");
         fflush(stdout);
         return 0;
     }
@@ -2832,9 +2354,6 @@ int main(int argc, char** argv) {
     bool interactive = !g_caps.plain && isatty(0) && isatty(1);
     bool hooked = !env_or("DEEPFETCH_HOOK").empty();
     bool background = interactive && arg == "" && hooked;
-    kg::Probe kp;
-    if (interactive && (arg == "" || arg == "--static" || arg == "--once")) kp = kg::probe();
-    bool gfx = kp.ok;
     pid_t shell_pid = find_shell();
     g_shell_exe = detect_shell_exe();
     int ready_fd = -1;
@@ -2942,28 +2461,11 @@ int main(int argc, char** argv) {
     }
     Grid grid, canvas;
 
-    vector<string> gframes;
-    int gfw = 0, gfh = 0, gap_ms = 62;
-    unsigned gid = 0;
-    if (!fits) gfx = false;
-    if (gfx) {
-        int nf = kg::DEFAULT_FRAMES;
-        string ef = env_or("DEEPFETCH_FRAMES");
-        if (!ef.empty()) nf = std::max(24, std::min(240, atoi(ef.c_str())));
-        string ep = env_or("DEEPFETCH_FPS", env_or("FFSPIN_FPS"));
-        if (!ep.empty()) gap_ms = (int)std::lround(1000.0 / std::max(4.0, std::min(30.0, atof(ep.c_str()))));
-        gframes = kg::build(scene, kp.cw, kp.ch, nf, gfw, gfh);
-        if (gframes.empty()) gfx = false;
-        else gid = kg::new_id();
-    }
-
     auto static_print = [&]() {
         for (Gauge* g : gs) g->snap();
         auto info = build_info(st, si, L, logo.accent);
-        compose(scene, identity(), info, std::max(scene.CH, (int)info.size()), L, grid, canvas, gfx);
-        if (gfx) kg::upload(gframes, gfw, gfh, gid, gap_ms);
+        compose(scene, identity(), info, std::max(scene.CH, (int)info.size()), L, grid, canvas);
         write_all(grid_text(grid));
-        if (gfx) write_all(kg::place_rel(gid, scene.CW, scene.CH, grid.h, (grid.h - scene.CH) / 2));
     };
 
     if (!background || !fits) {
@@ -2980,8 +2482,7 @@ int main(int argc, char** argv) {
             write_all(msg);
         }
         if (interactive && arg == "" && !hooked)
-            write_all(gfx ? "deepfetch: чтобы значения обновлялись вживую, установите интеграцию (deepfetch --setup) и откройте новый терминал\n"
-                          : "deepfetch: анимация включится после установки интеграции (deepfetch --setup) и нового терминала\n");
+            write_all("deepfetch: анимация включится после установки интеграции (deepfetch --setup) и нового терминала\n");
         signal_ready();
         smp.shutdown();
         return 0;
@@ -3006,8 +2507,7 @@ int main(int argc, char** argv) {
     vector<Line> info = build_info(st, si, L, logo.accent);
     for (Gauge* g : gs) g->snap();
     spin.step(0);
-    compose(scene, spin.R, info, H, L, grid, canvas, gfx);
-    if (gfx) kg::upload(gframes, gfw, gfh, gid, gap_ms);
+    compose(scene, spin.R, info, H, L, grid, canvas);
     {
 
         string o = SYNC_ON;
@@ -3019,7 +2519,6 @@ int main(int argc, char** argv) {
         }
         o += "\x1b[" + std::to_string(g_top + 1) + ";1H";
         o += pres.update(grid);
-        if (gfx) o += kg::place_at(gid, scene.CW, scene.CH, g_top + 1 + (H - scene.CH) / 2, 1);
         o += "\x1b[" + std::to_string(g_top + H + 1) + ";1H";
         o += SYNC_OFF;
         write_all(o);
@@ -3123,17 +2622,13 @@ int main(int argc, char** argv) {
             info_dirty = true;
         }
         if (anim_g) info_dirty = true;
-        if (gfx && !info_dirty) {
-            usleep(40000);
-            continue;
-        }
 
         double w0 = now_sec();
         if (info_dirty) {
             info = build_info(st, si, L, logo.accent);
             info_dirty = false;
         }
-        compose(scene, spin.R, info, H, L, grid, canvas, gfx);
+        compose(scene, spin.R, info, H, L, grid, canvas);
         write_all(SYNC_ON + pres.update(grid) + SYNC_OFF);
         double w = now_sec() - w0;
         ema_work = ema_work * 0.8 + w * 0.2;
@@ -3147,7 +2642,7 @@ int main(int argc, char** argv) {
     if (!aborted && !skip_final && !paused && !g_write_failed) {
         for (Gauge* g : gs) g->snap();
         info = build_info(st, si, L, logo.accent);
-        compose(scene, identity(), info, H, L, grid, canvas, gfx);
+        compose(scene, identity(), info, H, L, grid, canvas);
         write_all(SYNC_ON + pres.update(grid) + SYNC_OFF);
     }
     if (!rowpath.empty()) unlink(rowpath.c_str());
