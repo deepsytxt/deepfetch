@@ -2555,10 +2555,6 @@ int main(int argc, char** argv) {
             paused = true;
             int pr;
             read_row(pr, pause_stamp);
-            for (Gauge* g : gs) g->snap();
-            info = build_info(st, si, L, logo.accent);
-            compose(scene, identity(), info, H, L, grid, canvas);
-            write_all(SYNC_ON + pres.update(grid) + SYNC_OFF);
             write_state(spath, H, 1);
         }
         if (paused) {
@@ -2576,8 +2572,8 @@ int main(int argc, char** argv) {
                 }
                 paused = false;
                 g_pause = 0;
-                spin = Spin();
                 pres.invalidate();
+                info_dirty = true;
                 write_state(spath, H, 0);
                 t_last = now_sec();
             } else {
