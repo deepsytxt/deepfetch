@@ -1953,17 +1953,30 @@ static void term_size(int& cols, int& rows) {
     }
 }
 
+static bool dir_writable(const string& d) {
+    struct stat st;
+    return !d.empty() && stat(d.c_str(), &st) == 0 && S_ISDIR(st.st_mode) && access(d.c_str(), W_OK | X_OK) == 0;
+}
+
+static string home_dir();
+
+static string state_dir() {
+    // Termux: нет /tmp, зато есть $TMPDIR и $PREFIX/tmp.
+    string cands[] = {env_or("XDG_RUNTIME_DIR"), env_or("TMPDIR"), env_or("PREFIX") + "/tmp", "/tmp", "/var/tmp"};
+    for (auto& c : cands)
+        if (dir_writable(c)) return c;
+    string cache = home_dir() + "/.cache";
+    mkdir(cache.c_str(), 0755);
+    if (dir_writable(cache)) return cache;
+    string h = home_dir();
+    return dir_writable(h) ? h : "";
+}
+
+// Ключ — id сессии (одинаков для оболочки, её хуков и фонового демона; не зависит от ttyname/tty).
 static string state_path() {
-    const char* tn = nullptr;
-    for (int fd : {1, 0, 2})
-        if (isatty(fd) && (tn = ttyname(fd))) break;
-    if (!tn) return "";
-    string key = tn;
-    for (char& c : key)
-        if (c == '/') c = '_';
-    string dir = env_or("XDG_RUNTIME_DIR");
-    if (dir.empty() || access(dir.c_str(), W_OK) != 0) dir = "/tmp";
-    return dir + "/deepfetch-" + std::to_string((int)getuid()) + key + ".state";
+    string dir = state_dir();
+    if (dir.empty()) return "";
+    return dir + "/deepfetch-" + std::to_string((int)getuid()) + "-" + std::to_string((int)getsid(0)) + ".state";
 }
 
 static bool read_state(const string& path, pid_t& pid, int& h) {
@@ -1981,10 +1994,56 @@ static bool is_ours(pid_t pid) {
     return trim(first_line("/proc/" + std::to_string(pid) + "/comm")) == trim(first_line("/proc/self/comm"));
 }
 
-static void write_state(const string& path, int h, int paused = 0) {
-    if (path.empty()) return;
+static bool write_state(const string& path, int h, int paused = 0) {
+    if (path.empty()) return false;
     std::ofstream f(path, std::ios::trunc);
     f << (long)getpid() << " " << h << " " << paused << "\n";
+    f.flush();
+    return (bool)f;
+}
+
+// Принадлежит ли файл состояния ещё нам (если нет — нас вытеснили или файл удалили).
+static bool state_owned(const string& path) {
+    pid_t p;
+    int h;
+    return !path.empty() && read_state(path, p, h) && p == getpid();
+}
+
+// Запасной поиск демона по /proc: тот же пользователь, та же сессия, то же имя процесса.
+static pid_t scan_daemon() {
+    pid_t me = getpid(), parent = getppid(), sid = getsid(0);
+    string comm = trim(first_line("/proc/self/comm"));
+    pid_t found = 0;
+    if (DIR* d = opendir("/proc")) {
+        while (dirent* e = readdir(d)) {
+            if (!isdigit((unsigned char)e->d_name[0])) continue;
+            pid_t p = (pid_t)atol(e->d_name);
+            if (p == me || p == parent || p <= 1) continue;
+            string base = string("/proc/") + e->d_name;
+            struct stat st;
+            if (stat(base.c_str(), &st) != 0 || st.st_uid != getuid()) continue;
+            if (trim(first_line(base + "/comm")) != comm) continue;
+            string stt = read_file(base + "/stat");
+            size_t r = stt.rfind(')');
+            if (r == string::npos) continue;
+            char state;
+            long pp = 0, pg = 0, ss = 0;
+            if (sscanf(stt.c_str() + r + 1, " %c %ld %ld %ld", &state, &pp, &pg, &ss) != 4) continue;
+            if (state == 'Z' || (pid_t)ss != sid) continue;
+            found = p;
+            break;
+        }
+        closedir(d);
+    }
+    return found;
+}
+
+// Демон этой сессии: сначала по файлу состояния, затем по /proc.
+static pid_t find_daemon(const string& path) {
+    pid_t p = 0;
+    int h = 0;
+    if (!path.empty() && read_state(path, p, h) && p != getpid() && is_ours(p)) return p;
+    return scan_daemon();
 }
 
 static bool state_paused(const string& path) {
@@ -2001,9 +2060,8 @@ static void remove_state(const string& path) {
 }
 
 static void stop_previous(const string& path) {
-    pid_t p;
-    int h;
-    if (path.empty() || !read_state(path, p, h) || p == getpid() || !is_ours(p)) return;
+    pid_t p = find_daemon(path);
+    if (p <= 0) return;
     kill(p, SIGTERM);
     for (int i = 0; i < 40 && kill(p, 0) == 0; i++) usleep(25000);
 }
@@ -2315,7 +2373,7 @@ int main(int argc, char** argv) {
         string sp = state_path();
         pid_t p = 0;
         int h = 0;
-        if (sp.empty() || !read_state(sp, p, h) || !is_ours(p)) return 0;
+        if (sp.empty() || find_daemon(sp) <= 0) return 0;
         int r = query_cursor_row();
         if (r > 0) {
             std::ofstream f(sp + ".row", std::ios::trunc);
@@ -2331,11 +2389,12 @@ int main(int argc, char** argv) {
         string sp = state_path();
         pid_t p = 0;
         int h = 0;
-        bool alive = !sp.empty() && read_state(sp, p, h) && is_ours(p);
+        p = find_daemon(sp);
+        bool alive = p > 0;
         if (alive) {
             if (arg == "--release") {
                 kill(p, SIGUSR1);
-                for (int i = 0; i < 100 && is_ours(p) && !state_paused(sp); i++) usleep(5000);
+                for (int i = 0; i < 100 && is_ours(p) && !(sp.empty() ? false : state_paused(sp)); i++) usleep(5000);
                 return 0;
             }
             kill(p, SIGTERM);
@@ -2461,6 +2520,14 @@ int main(int argc, char** argv) {
     }
     Grid grid, canvas;
 
+    // Без записываемого файла состояния hooks (clear / Ctrl+L) не смогут остановить демон —
+    // тогда лучше не анимировать вообще, чем оставлять артефакты на экране.
+    bool state_ok = true;
+    if (background && fits) {
+        state_ok = write_state(spath, H);
+        if (!state_ok) fits = false;
+    }
+
     auto static_print = [&]() {
         for (Gauge* g : gs) g->snap();
         auto info = build_info(st, si, L, logo.accent);
@@ -2475,7 +2542,9 @@ int main(int argc, char** argv) {
             L.panelw = 2 + LBL + L.bw + 1 + VALW;
         }
         static_print();
-        if (background && !fits) {
+        if (background && !state_ok) {
+            write_all("deepfetch: нет доступного каталога для файла состояния, показан статичный вывод\n");
+        } else if (background && !fits) {
             char msg[200];
             snprintf(msg, sizeof msg, "deepfetch: окно мало для анимации (строк: %d, нужно около %d), показан статичный вывод\n",
                      rows, H + 3);
@@ -2483,6 +2552,7 @@ int main(int argc, char** argv) {
         }
         if (interactive && arg == "" && !hooked)
             write_all("deepfetch: анимация включится после установки интеграции (deepfetch --setup) и нового терминала\n");
+        if (background && state_ok) remove_state(spath);
         signal_ready();
         smp.shutdown();
         return 0;
@@ -2615,6 +2685,10 @@ int main(int argc, char** argv) {
             st.pulse = !st.pulse;
             next_sample = t + SAMPLE_SEC;
             info_dirty = true;
+            if (!state_owned(spath)) {
+                aborted = true;
+                break;
+            }
         }
         int av = g_async.version.load();
         if (av != async_seen) {
