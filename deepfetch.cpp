@@ -102,6 +102,8 @@ static string env_or(const char* k, const string& d = "") {
     return (v && *v) ? string(v) : d;
 }
 
+static string g_shell_exe;
+
 static bool icontains(const string& h, const string& n) {
     auto low = [](string s) {
         for (char& c : s) c = (char)tolower((unsigned char)c);
@@ -1244,7 +1246,7 @@ static void async_worker() {
     string pk;
     for (size_t i = 0; i < parts.size(); i++) pk += (i ? ", " : "") + parts[i];
     if (pk.empty()) pk = "-";
-    string sh = env_or("SHELL");
+    string sh = !g_shell_exe.empty() ? g_shell_exe : env_or("SHELL");
     string ver;
     if (!sh.empty()) ver = extract_version(run_cmd("'" + sh + "' --version 2>&1 | head -n1"));
     {
@@ -1289,7 +1291,7 @@ static StaticInfo collect_static(int threads) {
     if (generic(hm)) hm = first_line("/sys/devices/virtual/dmi/id/board_name");
     if (generic(hm)) hm.clear();
     si.hostModel = hm;
-    string sh = env_or("SHELL");
+    string sh = !g_shell_exe.empty() ? g_shell_exe : env_or("SHELL");
     si.shell = sh.empty() ? "?" : sh.substr(sh.rfind('/') + 1);
     string de = env_or("XDG_CURRENT_DESKTOP", env_or("DESKTOP_SESSION", ""));
     string sess = env_or("XDG_SESSION_TYPE");
@@ -2080,8 +2082,22 @@ static void make_dirs(const string& path) {
         if (i == path.size() || path[i] == '/') mkdir(path.substr(0, i).c_str(), 0755);
 }
 
+static string detect_shell_exe() {
+    pid_t p = find_shell();
+    char buf[4096];
+    ssize_t n = readlink(("/proc/" + std::to_string(p) + "/exe").c_str(), buf, sizeof buf - 1);
+    if (n > 0) {
+        buf[n] = 0;
+        string e = buf;
+        size_t d = e.find(" (deleted)");
+        if (d != string::npos) e.erase(d);
+        return e;
+    }
+    return env_or("SHELL");
+}
+
 static string shell_name() {
-    string sh = env_or("SHELL");
+    string sh = g_shell_exe.empty() ? detect_shell_exe() : g_shell_exe;
     size_t sl = sh.rfind('/');
     return sl == string::npos ? sh : sh.substr(sl + 1);
 }
@@ -2259,6 +2275,7 @@ int main(int argc, char** argv) {
     bool interactive = !g_caps.plain && isatty(0) && isatty(1);
     bool background = interactive && arg == "";
     pid_t shell_pid = find_shell();
+    g_shell_exe = detect_shell_exe();
     int ready_fd = -1;
     if (background) first_run_setup();
     string spath = state_path();
