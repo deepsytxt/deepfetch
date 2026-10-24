@@ -1923,12 +1923,9 @@ static void compose(const Scene& sc, const Mat3& R, const vector<Line>& info, in
 }
 
 static volatile sig_atomic_t g_stop = 0;
-static volatile sig_atomic_t g_release = 0;
 static void on_stop(int) { g_stop = 1; }
-static void on_release(int) {
-    g_release = 1;
-    g_stop = 1;
-}
+static volatile sig_atomic_t g_pause = 0;
+static void on_release(int) { g_pause = 1; }
 static bool g_write_failed = false;
 
 static void write_all(const string& s) {
@@ -1984,10 +1981,17 @@ static bool is_ours(pid_t pid) {
     return trim(first_line("/proc/" + std::to_string(pid) + "/comm")) == trim(first_line("/proc/self/comm"));
 }
 
-static void write_state(const string& path, int h) {
+static void write_state(const string& path, int h, int paused = 0) {
     if (path.empty()) return;
     std::ofstream f(path, std::ios::trunc);
-    f << (long)getpid() << " " << h << "\n";
+    f << (long)getpid() << " " << h << " " << paused << "\n";
+}
+
+static bool state_paused(const string& path) {
+    std::ifstream f(path);
+    long p = 0;
+    int h = 0, z = 0;
+    return (f >> p >> h >> z) && z == 1;
 }
 
 static void remove_state(const string& path) {
@@ -2315,7 +2319,7 @@ int main(int argc, char** argv) {
         int r = query_cursor_row();
         if (r > 0) {
             std::ofstream f(sp + ".row", std::ios::trunc);
-            f << r << "\n";
+            f << r << " " << (long long)(now_sec() * 1e6) << "\n";
         }
         return 0;
     }
@@ -2329,7 +2333,12 @@ int main(int argc, char** argv) {
         int h = 0;
         bool alive = !sp.empty() && read_state(sp, p, h) && is_ours(p);
         if (alive) {
-            kill(p, arg == "--release" ? SIGUSR1 : SIGTERM);
+            if (arg == "--release") {
+                kill(p, SIGUSR1);
+                for (int i = 0; i < 100 && is_ours(p) && !state_paused(sp); i++) usleep(5000);
+                return 0;
+            }
+            kill(p, SIGTERM);
             wait_exit(p);
         }
         if (arg == "--release") return 0;
@@ -2520,42 +2529,77 @@ int main(int argc, char** argv) {
     string rowpath = spath.empty() ? "" : spath + ".row";
     if (!rowpath.empty()) unlink(rowpath.c_str());
     const int block_end = g_top + H;
-    double away_since = 0;
-    bool armed = false, released_by_poll = false, info_dirty = true, aborted = false;
+    auto read_row = [&](int& row, long long& stamp) {
+        row = 0;
+        stamp = 0;
+        if (rowpath.empty()) return;
+        std::ifstream rf(rowpath);
+        if (!(rf >> row >> stamp)) row = 0;
+    };
+    bool info_dirty = true, aborted = false, paused = false, skip_final = false;
+    long long pause_stamp = 0;
     double t_last = now_sec(), next_sample = t_last + SAMPLE_SEC;
     double ema_work = 0.002, fps_cap = fps;
     int async_seen = g_async.version.load();
 
     while (!g_stop && !g_write_failed) {
         if (kill(shell_pid, 0) != 0 && errno == ESRCH) break;
-        if (!foreground_ok()) {
-            double tn = now_sec();
-            if (away_since == 0) away_since = tn;
-            if (armed && tn - away_since > 0.12) {
-                released_by_poll = true;
-                break;
-            }
-            usleep(30000);
-            t_last = now_sec();
-            continue;
-        }
-        armed = true;
-        away_since = 0;
-
-        double t = now_sec();
-        double dt = std::min(0.25, t - t_last);
-        t_last = t;
-
         int c2, r2;
         term_size(c2, r2);
         if (c2 != cols || r2 != rows) {
             aborted = true;
             break;
         }
-        if (!rowpath.empty()) {
-            int cur = 0;
-            std::ifstream rf(rowpath);
-            if (rf >> cur && cur > 0) {
+        if (g_pause && !paused) {
+            g_pause = 0;
+            paused = true;
+            int pr;
+            read_row(pr, pause_stamp);
+            for (Gauge* g : gs) g->snap();
+            info = build_info(st, si, L, logo.accent);
+            compose(scene, identity(), info, H, L, grid, canvas);
+            write_all(SYNC_ON + pres.update(grid) + SYNC_OFF);
+            write_state(spath, H, 1);
+        }
+        if (paused) {
+            int cur;
+            long long stamp;
+            read_row(cur, stamp);
+            if (cur > 0 && stamp != pause_stamp) {
+                if (cur <= block_end) {
+                    aborted = true;
+                    break;
+                }
+                if (rows - cur < FREEZE_ROWS) {
+                    skip_final = true;
+                    break;
+                }
+                paused = false;
+                g_pause = 0;
+                spin = Spin();
+                pres.invalidate();
+                write_state(spath, H, 0);
+                t_last = now_sec();
+            } else {
+                usleep(30000);
+                continue;
+            }
+        }
+        if (!foreground_ok()) {
+            usleep(30000);
+            t_last = now_sec();
+            continue;
+        }
+
+        double t = now_sec();
+        double dt = std::min(0.25, t - t_last);
+        t_last = t;
+
+        {
+            int cur;
+            long long stamp;
+            read_row(cur, stamp);
+            if (cur > 0) {
                 if (cur <= block_end) {
                     aborted = true;
                     break;
@@ -2599,7 +2643,7 @@ int main(int argc, char** argv) {
         if (wait > 0) usleep((useconds_t)(wait * 1e6));
     }
 
-    if (!released_by_poll && !aborted && !g_write_failed) {
+    if (!aborted && !skip_final && !paused && !g_write_failed) {
         for (Gauge* g : gs) g->snap();
         info = build_info(st, si, L, logo.accent);
         compose(scene, identity(), info, H, L, grid, canvas);
