@@ -2572,6 +2572,10 @@ int main(int argc, char** argv) {
         return fg < 0 || shell_pgrp < 0 || fg == shell_pgrp;
     };
 
+    // По умолчанию блок ведёт себя как вывод обычного fastfetch: прокручивается вместе с терминалом,
+    // команды выполняются ниже. Закреплённый режим (область прокрутки) включается DEEPFETCH_PIN=1.
+    const bool pinned = env_or("DEEPFETCH_PIN") == "1";
+    const int PROMPT_MARGIN = 4;  // сколько строк снизу экрана нужно оставить под промпт
     Pinned pres;
     bool region_set = false;
     Spin spin;
@@ -2592,11 +2596,13 @@ int main(int argc, char** argv) {
         o += pres.update(grid);
         // Закрепляем блок: область прокрутки начинается под ним, поэтому вывод команд и промпт
         // прокручиваются только ниже, а логотип и данные остаются на месте и продолжают обновляться.
-        o += "\x1b[" + std::to_string(g_top + H + 1) + ";" + std::to_string(rows) + "r";
+        if (pinned) {
+            o += "\x1b[" + std::to_string(g_top + H + 1) + ";" + std::to_string(rows) + "r";
+            region_set = true;
+        }
         o += "\x1b[" + std::to_string(g_top + H + 1) + ";1H";
         o += SYNC_OFF;
         write_all(o);
-        region_set = true;
     }
     write_state(spath, H);
     signal_ready();
@@ -2645,6 +2651,12 @@ int main(int argc, char** argv) {
                     aborted = true;
                     break;
                 }
+                if (!pinned && cur > rows - PROMPT_MARGIN) {
+                    // Экран мог прокрутиться: где теперь блок, терминал не сообщает.
+                    // Рисовать по старым координатам нельзя, блок остаётся в истории как есть.
+                    aborted = true;
+                    break;
+                }
                 paused = false;
                 g_pause = 0;
                 pres.invalidate();
@@ -2655,6 +2667,10 @@ int main(int argc, char** argv) {
                 usleep(30000);
                 continue;
             }
+        }
+        if (relayout && !pinned) {
+            aborted = true;  // текст переложился, позиция блока неизвестна
+            break;
         }
         if (relayout) {
             // Размер окна изменился: ждём, пока он перестанет меняться, и пересчитываем раскладку.
@@ -2717,7 +2733,7 @@ int main(int argc, char** argv) {
             long long stamp;
             read_row(cur, stamp);
             if (cur > 0) {
-                if (cur <= block_end) {
+                if (cur <= block_end || (!pinned && cur > rows - PROMPT_MARGIN)) {
                     aborted = true;
                     break;
                 }
