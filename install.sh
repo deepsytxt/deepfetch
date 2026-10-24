@@ -45,6 +45,10 @@ mkdir -p "$PREFIX/bin"
 install -m755 "$TMP/deepfetch" "$PREFIX/bin/deepfetch"
 say "Установлено: $PREFIX/bin/deepfetch"
 
+if [ -z "${DEEPFETCH_NO_SETUP:-}" ]; then
+    "$PREFIX/bin/deepfetch" --setup || say "Интеграцию с clear можно добавить позже: deepfetch --setup"
+fi
+
 case ":$PATH:" in
     *":$PREFIX/bin:"*) ;;
     *) say "Добавьте $PREFIX/bin в PATH (fish: fish_add_path $PREFIX/bin)" ;;

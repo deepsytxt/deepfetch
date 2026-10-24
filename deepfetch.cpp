@@ -5,6 +5,7 @@
 #include <pwd.h>
 #include <sys/ioctl.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <sys/utsname.h>
 #include <sys/wait.h>
@@ -2009,6 +2010,159 @@ static bool choose_layout(const Stats& s, const StaticInfo& si, const Scene& sc,
     return false;
 }
 
+
+static string proc_comm(pid_t p) {
+    string c = read_file("/proc/" + std::to_string(p) + "/comm");
+    while (!c.empty() && (c.back() == '\n' || c.back() == ' ')) c.pop_back();
+    return c;
+}
+
+static pid_t proc_ppid(pid_t p) {
+    string st = read_file("/proc/" + std::to_string(p) + "/stat");
+    size_t r = st.rfind(')');
+    if (r == string::npos) return -1;
+    char state;
+    long pp = -1;
+    if (sscanf(st.c_str() + r + 1, " %c %ld", &state, &pp) != 2) return -1;
+    return (pid_t)pp;
+}
+
+static bool proc_command_mode(pid_t p) {
+    string cl = read_file("/proc/" + std::to_string(p) + "/cmdline");
+    size_t pos = 0;
+    bool first = true;
+    while (pos < cl.size()) {
+        size_t e = cl.find('\0', pos);
+        if (e == string::npos) e = cl.size();
+        string a = cl.substr(pos, e - pos);
+        pos = e + 1;
+        if (first) { first = false; continue; }
+        if (a.size() >= 2 && a[0] == '-' && a[1] != '-' && a.find('c') != string::npos) return true;
+        if (!a.empty() && a[0] != '-') break;
+    }
+    return false;
+}
+
+static pid_t find_shell() {
+    static const char* names[] = {"fish", "bash", "zsh", "sh", "dash", "ash", "ksh", "mksh", "oksh",
+                                  "yash", "tcsh", "csh", "nu", "xonsh", "elvish", "pwsh"};
+    pid_t sid = tcgetsid(1);
+    pid_t p = getppid();
+    for (int i = 0; i < 12 && p > 1; i++) {
+        string c = proc_comm(p);
+        bool sh = false;
+        for (const char* n : names) if (c == n) sh = true;
+        if (sh && !proc_command_mode(p)) return p;
+        if (p == sid) break;
+        pid_t pp = proc_ppid(p);
+        if (pp <= 1) break;
+        p = pp;
+    }
+    return getppid();
+}
+
+static string home_dir() {
+    string h = env_or("HOME");
+    if (h.empty()) {
+        struct passwd* pw = getpwuid(getuid());
+        if (pw && pw->pw_dir) h = pw->pw_dir;
+    }
+    return h;
+}
+
+static string config_dir() {
+    string x = env_or("XDG_CONFIG_HOME");
+    return x.empty() ? home_dir() + "/.config" : x;
+}
+
+static void make_dirs(const string& path) {
+    for (size_t i = 1; i <= path.size(); i++)
+        if (i == path.size() || path[i] == '/') mkdir(path.substr(0, i).c_str(), 0755);
+}
+
+static string shell_name() {
+    string sh = env_or("SHELL");
+    size_t sl = sh.rfind('/');
+    return sl == string::npos ? sh : sh.substr(sl + 1);
+}
+
+static const char* RC_MARK = "# deepfetch";
+
+static string rc_path(const string& sh) {
+    if (sh == "fish") return config_dir() + "/fish/conf.d/deepfetch.fish";
+    if (sh == "bash") return home_dir() + "/.bashrc";
+    if (sh == "zsh") {
+        string z = env_or("ZDOTDIR");
+        return (z.empty() ? home_dir() : z) + "/.zshrc";
+    }
+    return "";
+}
+
+static bool setup_installed(const string& sh) {
+    string p = rc_path(sh);
+    return !p.empty() && read_file(p).find("deepfetch --init") != string::npos;
+}
+
+static bool setup_integration(const string& sh, bool remove) {
+    string p = rc_path(sh);
+    if (p.empty()) return false;
+    if (sh == "fish") {
+        if (remove) return unlink(p.c_str()) == 0 || errno == ENOENT;
+        make_dirs(config_dir() + "/fish/conf.d");
+        std::ofstream f(p, std::ios::trunc);
+        f << "if command -q deepfetch\n    deepfetch --init fish | source\nend\n";
+        return (bool)f;
+    }
+    string cur = read_file(p);
+    string line = "command -v deepfetch >/dev/null 2>&1 && eval \"$(deepfetch --init " + sh + ")\"";
+    string block = string(RC_MARK) + "\n" + line + "\n";
+    size_t at = cur.find(block);
+    if (remove) {
+        if (at == string::npos) return true;
+        cur.erase(at, block.size());
+        std::ofstream f(p, std::ios::trunc);
+        f << cur;
+        return (bool)f;
+    }
+    if (at != string::npos) return true;
+    std::ofstream f(p, std::ios::app);
+    if (!cur.empty() && cur.back() != '\n') f << "\n";
+    f << block;
+    return (bool)f;
+}
+
+static string source_hint(const string& sh) {
+    if (sh == "fish") return "source " + rc_path(sh);
+    return "source " + rc_path(sh);
+}
+
+static string asked_path() { return config_dir() + "/deepfetch/asked"; }
+
+static void first_run_setup() {
+    if (!env_or("DEEPFETCH_HOOK").empty() || !env_or("DEEPFETCH_NO_SETUP").empty()) return;
+    string sh = shell_name();
+    if (rc_path(sh).empty()) return;
+    if (access(asked_path().c_str(), F_OK) == 0) return;
+    if (setup_installed(sh)) return;
+    printf("deepfetch: чтобы clear и Ctrl+L корректно убирали блок, нужна интеграция с %s.\n", sh.c_str());
+    printf("Добавить её в %s? [Y/n] ", rc_path(sh).c_str());
+    fflush(stdout);
+    char buf[64] = {0};
+    bool yes = true;
+    if (fgets(buf, sizeof buf, stdin)) yes = !(buf[0] == 'n' || buf[0] == 'N');
+    make_dirs(config_dir() + "/deepfetch");
+    {
+        std::ofstream f(asked_path());
+        f << "1\n";
+    }
+    if (yes && setup_integration(sh, false)) {
+        printf("Готово. Откройте новый терминал или выполните: %s\n", source_hint(sh).c_str());
+        printf("Убрать интеграцию: deepfetch --unsetup. Enter для продолжения...");
+        fflush(stdout);
+        if (!fgets(buf, sizeof buf, stdin)) {}
+    }
+}
+
 static void usage() {
     puts("deepfetch - fastfetch с живыми данными и вращающимся 3D-логотипом\n"
          "\n"
@@ -2024,15 +2178,18 @@ static void usage() {
 
 static int print_init(const string& sh) {
     if (sh == "fish") {
-        puts("function clear\n"
+        puts("set -gx DEEPFETCH_HOOK 1\n"
+             "function clear\n"
              "    deepfetch --clear\n"
              "end\n"
              "bind ctrl-l 'deepfetch --clear; commandline -f repaint'");
     } else if (sh == "bash") {
-        puts("clear() { deepfetch --clear; }\n"
+        puts("export DEEPFETCH_HOOK=1\n"
+             "clear() { deepfetch --clear; }\n"
              "bind -x '\"\\C-l\": deepfetch --clear'");
     } else if (sh == "zsh") {
-        puts("clear() { deepfetch --clear }\n"
+        puts("export DEEPFETCH_HOOK=1\n"
+             "clear() { deepfetch --clear }\n"
              "deepfetch-clear-widget() { deepfetch --clear; zle reset-prompt }\n"
              "zle -N deepfetch-clear-widget\n"
              "bindkey '^L' deepfetch-clear-widget");
@@ -2046,6 +2203,9 @@ static int print_init(const string& sh) {
 static bool wait_exit(pid_t p) {
     for (int i = 0; i < 60; i++) {
         if (kill(p, 0) != 0) return true;
+        string st = read_file("/proc/" + std::to_string(p) + "/stat");
+        size_t r = st.rfind(')');
+        if (r != string::npos && r + 2 < st.size() && st[r + 2] == 'Z') return true;
         usleep(25000);
     }
     return false;
@@ -2055,6 +2215,21 @@ int main(int argc, char** argv) {
     string arg = argc > 1 ? argv[1] : "";
     if (arg == "--help" || arg == "-h") { usage(); return 0; }
     if (arg == "--init") return print_init(argc > 2 ? argv[2] : "");
+    if (arg == "--setup" || arg == "--unsetup") {
+        string sh = argc > 2 ? argv[2] : shell_name();
+        bool rm = arg == "--unsetup";
+        if (rc_path(sh).empty()) {
+            fprintf(stderr, "deepfetch: оболочка %s не поддерживается, используйте fish, bash или zsh\n", sh.c_str());
+            return 2;
+        }
+        if (!setup_integration(sh, rm)) {
+            fprintf(stderr, "deepfetch: не удалось изменить %s\n", rc_path(sh).c_str());
+            return 1;
+        }
+        if (rm) printf("Интеграция убрана из %s\n", rc_path(sh).c_str());
+        else printf("Интеграция добавлена в %s. Откройте новый терминал или выполните: %s\n", rc_path(sh).c_str(), source_hint(sh).c_str());
+        return 0;
+    }
     if (arg != "" && arg != "--stop" && arg != "--static" && arg != "--once" && arg != "--clear") {
         fprintf(stderr, "deepfetch: неизвестный параметр %s (см. --help)\n", arg.c_str());
         return 2;
@@ -2083,8 +2258,9 @@ int main(int argc, char** argv) {
 
     bool interactive = !g_caps.plain && isatty(0) && isatty(1);
     bool background = interactive && arg == "";
-    pid_t shell_pid = getppid();
+    pid_t shell_pid = find_shell();
     int ready_fd = -1;
+    if (background) first_run_setup();
     string spath = state_path();
 
     if (background) {
@@ -2166,7 +2342,17 @@ int main(int argc, char** argv) {
     }
     Layout L;
     int H = 0;
-    bool fits = choose_layout(st, si, scene, cols, rows, logo.accent, background ? SHELL_ROWS : 1, L, H);
+    int need_used = SHELL_ROWS;
+    bool fits = false;
+    if (background) {
+        for (int need : {SHELL_ROWS, 5, 3}) {
+            need_used = need;
+            fits = choose_layout(st, si, scene, cols, rows, logo.accent, need, L, H);
+            if (fits) break;
+        }
+    } else {
+        fits = choose_layout(st, si, scene, cols, rows, logo.accent, 1, L, H);
+    }
     Grid grid, canvas;
 
     auto static_print = [&]() {
@@ -2183,6 +2369,12 @@ int main(int argc, char** argv) {
             L.panelw = 2 + LBL + L.bw + 1 + VALW;
         }
         static_print();
+        if (background && !fits) {
+            char msg[200];
+            snprintf(msg, sizeof msg, "deepfetch: окно мало для анимации (строк: %d, нужно около %d), показан статичный вывод\n",
+                     rows, H + 3);
+            write_all(msg);
+        }
         signal_ready();
         smp.shutdown();
         return 0;
@@ -2253,7 +2445,7 @@ int main(int argc, char** argv) {
             rows = r2;
             Layout nl = L;
             int newH = 0;
-            if (!choose_layout(st, si, scene, cols, rows, logo.accent, SHELL_ROWS, nl, newH)) break;
+            if (!choose_layout(st, si, scene, cols, rows, logo.accent, need_used, nl, newH)) break;
             for (int y = 0; y < std::max(H, newH); y++) pre += Pinned::cup(y, 0) + "\x1b[2K";
             L = nl;
             H = newH;
