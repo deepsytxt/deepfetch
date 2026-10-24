@@ -2306,25 +2306,32 @@ static int print_init(const string& sh) {
 
 
 static int query_cursor_row() {
-    if (!isatty(0) || !isatty(1)) return -1;
+    int tfd = open("/dev/tty", O_RDWR | O_NOCTTY);
+    int rfd = tfd, wfd = tfd;
+    if (tfd < 0) {
+        if (!isatty(0) || !isatty(1)) return -1;
+        rfd = 0;
+        wfd = 1;
+    }
+    struct Closer { int fd; ~Closer() { if (fd >= 0) close(fd); } } closer{tfd};
     termios old{};
-    if (tcgetattr(0, &old) != 0) return -1;
+    if (tcgetattr(rfd, &old) != 0) return -1;
     termios raw = old;
     raw.c_lflag &= ~(tcflag_t)(ICANON | ECHO);
     raw.c_cc[VMIN] = 0;
     raw.c_cc[VTIME] = 0;
-    if (tcsetattr(0, TCSANOW, &raw) != 0) return -1;
+    if (tcsetattr(rfd, TCSANOW, &raw) != 0) return -1;
     const char* q = "\x1b[6n";
-    ssize_t w = write(1, q, 4);
+    ssize_t w = write(wfd, q, 4);
     (void)w;
     string buf;
     double end = now_sec() + 0.4;
     int row = -1;
     while (now_sec() < end) {
-        pollfd p{0, POLLIN, 0};
+        pollfd p{rfd, POLLIN, 0};
         if (poll(&p, 1, 50) <= 0) continue;
         char tmp[64];
-        ssize_t n = read(0, tmp, sizeof tmp);
+        ssize_t n = read(rfd, tmp, sizeof tmp);
         if (n <= 0) break;
         buf.append(tmp, (size_t)n);
         size_t e = buf.find('R');
@@ -2335,7 +2342,7 @@ static int query_cursor_row() {
             break;
         }
     }
-    tcsetattr(0, TCSANOW, &old);
+    tcsetattr(rfd, TCSANOW, &old);
     return row;
 }
 
@@ -2393,6 +2400,11 @@ int main(int argc, char** argv) {
         bool alive = p > 0;
         if (alive) {
             if (arg == "--release") {
+                int pr = query_cursor_row();
+                if (pr > 0 && !sp.empty()) {
+                    std::ofstream f(sp + ".pre", std::ios::trunc);
+                    f << pr << " " << (long long)(now_sec() * 1e6) << "\n";
+                }
                 kill(p, SIGUSR1);
                 for (int i = 0; i < 100 && is_ours(p) && !(sp.empty() ? false : state_paused(sp)); i++) usleep(5000);
                 return 0;
@@ -2575,7 +2587,12 @@ int main(int argc, char** argv) {
     // По умолчанию блок ведёт себя как вывод обычного fastfetch: прокручивается вместе с терминалом,
     // команды выполняются ниже. Закреплённый режим (область прокрутки) включается DEEPFETCH_PIN=1.
     const bool pinned = env_or("DEEPFETCH_PIN") == "1";
-    const int PROMPT_MARGIN = 4;  // сколько строк снизу экрана нужно оставить под промпт
+    // Сколько строк промпт занимает ниже своей первой строки. Меряется по строке курсора на
+    // промпте и на запуске команды; пока не измерено, берём запас.
+    int prompt_extra = 2;
+    int last_prompt_row = 0;
+    long long last_pre_stamp = 0;
+    string prepath;
     Pinned pres;
     bool region_set = false;
     Spin spin;
@@ -2610,6 +2627,20 @@ int main(int argc, char** argv) {
     string rowpath = spath.empty() ? "" : spath + ".row";
     if (!rowpath.empty()) unlink(rowpath.c_str());
     int block_end = g_top + H;
+    prepath = spath.empty() ? "" : spath + ".pre";
+    if (!prepath.empty()) unlink(prepath.c_str());
+    auto read_pre = [&]() {
+        if (prepath.empty()) return;
+        std::ifstream pf(prepath);
+        int pr = 0;
+        long long ps = 0;
+        if (!(pf >> pr >> ps) || ps == last_pre_stamp) return;
+        last_pre_stamp = ps;
+        // Курсор не упирался в низ, значит разница строк — настоящая высота промпта.
+        if (pr > 0 && pr < rows && last_prompt_row > 0 && pr >= last_prompt_row)
+            prompt_extra = std::min(6, pr - last_prompt_row);
+    };
+    auto scroll_risk = [&](int cur) { return !pinned && cur + prompt_extra > rows; };
     auto read_row = [&](int& row, long long& stamp) {
         row = 0;
         stamp = 0;
@@ -2663,6 +2694,7 @@ int main(int argc, char** argv) {
             paused = true;
             int pr;
             read_row(pr, pause_stamp);
+            read_pre();
             write_state(spath, H, 1);
         }
         if (paused) {
@@ -2674,7 +2706,8 @@ int main(int argc, char** argv) {
                     aborted = true;
                     break;
                 }
-                if (!pinned && cur > rows - PROMPT_MARGIN) {
+                last_prompt_row = cur;
+                if (scroll_risk(cur)) {
                     // Экран мог прокрутиться: где теперь блок, терминал не сообщает.
                     // Рисовать по старым координатам нельзя, блок остаётся в истории как есть.
                     offscreen = true;
@@ -2761,7 +2794,8 @@ int main(int argc, char** argv) {
                     aborted = true;
                     break;
                 }
-                if (!pinned && cur > rows - PROMPT_MARGIN) {
+                last_prompt_row = cur;
+                if (scroll_risk(cur)) {
                     offscreen = true;
                     continue;
                 }
@@ -2815,6 +2849,7 @@ int main(int argc, char** argv) {
     }
     if (region_set && !g_write_failed) write_all("\0337\x1b[r\0338");
     if (!rowpath.empty()) unlink(rowpath.c_str());
+    if (!prepath.empty()) unlink(prepath.c_str());
     remove_state(spath);
     smp.shutdown();
     return 0;
