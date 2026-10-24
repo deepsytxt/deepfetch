@@ -2182,7 +2182,7 @@ static int print_init(const string& sh) {
              "function clear\n"
              "    deepfetch --clear\n"
              "end\n"
-             "bind ctrl-l 'deepfetch --clear; commandline -f repaint'");
+             "bind \\cl 'deepfetch --clear; commandline -f repaint'");
     } else if (sh == "bash") {
         puts("export DEEPFETCH_HOOK=1\n"
              "clear() { deepfetch --clear; }\n"
@@ -2342,11 +2342,9 @@ int main(int argc, char** argv) {
     }
     Layout L;
     int H = 0;
-    int need_used = SHELL_ROWS;
     bool fits = false;
     if (background) {
         for (int need : {SHELL_ROWS, 5, 3}) {
-            need_used = need;
             fits = choose_layout(st, si, scene, cols, rows, logo.accent, need, L, H);
             if (fits) break;
         }
@@ -2417,7 +2415,8 @@ int main(int argc, char** argv) {
     write_state(spath, H);
     signal_ready();
 
-    bool paused = false, info_dirty = true;
+    bool paused = false, info_dirty = true, resize_pending = false, suspended = false;
+    double resize_t = 0;
     double t_last = now_sec(), next_sample = t_last + SAMPLE_SEC;
     double ema_work = 0.002, fps_cap = fps;
     int async_seen = g_async.version.load();
@@ -2443,15 +2442,50 @@ int main(int argc, char** argv) {
         if (c2 != cols || r2 != rows) {
             cols = c2;
             rows = r2;
+            resize_pending = true;
+            resize_t = t;
+        }
+        if (resize_pending) {
+            if (t - resize_t < 0.3) {
+                usleep(60000);
+                continue;
+            }
+            resize_pending = false;
             Layout nl = L;
             int newH = 0;
-            if (!choose_layout(st, si, scene, cols, rows, logo.accent, need_used, nl, newH)) break;
-            for (int y = 0; y < std::max(H, newH); y++) pre += Pinned::cup(y, 0) + "\x1b[2K";
-            L = nl;
-            H = newH;
-            write_state(spath, H);
-            info_dirty = true;
-            resumed = true;
+            bool ok = false;
+            for (int need : {SHELL_ROWS, 5, 3}) {
+                ok = choose_layout(st, si, scene, cols, rows, logo.accent, need, nl, newH);
+                if (ok) break;
+            }
+            if (!ok) {
+                write_all("\x1b[r\x1b[2J\x1b[H");
+                suspended = true;
+            } else {
+                L = nl;
+                H = newH;
+                write_state(spath, H);
+                info = build_info(st, si, L, logo.accent);
+                for (Gauge* g : gs) g->snap();
+                compose(scene, spin.R, info, H, L, grid, canvas);
+                pres.invalidate();
+                string o = SYNC_ON + "\x1b[r\x1b[2J\x1b[H";
+                o += pres.update(grid);
+                o += "\x1b[" + std::to_string(H + 1) + ";" + std::to_string(rows) + "r";
+                o += "\x1b[" + std::to_string(H + 1) + ";1H";
+                o += SYNC_OFF;
+                write_all(o);
+                suspended = false;
+                info_dirty = false;
+            }
+            kill(shell_pid, SIGWINCH);
+            t_last = now_sec();
+            continue;
+        }
+        if (suspended) {
+            usleep(150000);
+            t_last = now_sec();
+            continue;
         }
         if (resumed) {
             pre += region(H);
