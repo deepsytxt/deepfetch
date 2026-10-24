@@ -38,6 +38,7 @@ static constexpr double SPIN_FPS = 15;
 static constexpr double DEPTH = 0.09;
 static constexpr int LAYERS = 5;
 static constexpr int SHELL_ROWS = 8;
+static constexpr int FREEZE_ROWS = 5;
 static constexpr double FPS_MIN = 6;
 static constexpr double PERSPECTIVE = 3.0;
 static constexpr int SS = 4;
@@ -2192,7 +2193,8 @@ static void usage() {
          "  deepfetch --stop          остановить анимацию, блок остаётся на экране\n"
          "  deepfetch --static        один раз вывести блок без анимации\n"
          "  deepfetch --clear         остановить и полностью очистить экран\n"
-         "  deepfetch --release       закрепление снять, блок остаётся как есть\n"
+         "  deepfetch --release       остановить анимацию (для хуков оболочки)\n"
+         "  deepfetch --prompt        сообщить позицию курсора (для хуков оболочки)\n"
          "  deepfetch --init SHELL    код интеграции для fish, bash или zsh\n"
          "  deepfetch --help          справка\n"
          "\n"
@@ -2205,6 +2207,9 @@ static int print_init(const string& sh) {
              "function __deepfetch_release --on-event fish_preexec\n"
              "    deepfetch --release\n"
              "end\n"
+             "function __deepfetch_prompt --on-event fish_prompt\n"
+             "    deepfetch --prompt\n"
+             "end\n"
              "function clear\n"
              "    deepfetch --clear\n"
              "end\n"
@@ -2212,6 +2217,11 @@ static int print_init(const string& sh) {
     } else if (sh == "bash") {
         puts("export DEEPFETCH_HOOK=1\n"
              "PS0=${PS0}'$(deepfetch --release >/dev/null 2>&1)'\n"
+             "__deepfetch_prompt() { local s=$?; deepfetch --prompt 2>/dev/null; return $s; }\n"
+             "case \"$(declare -p PROMPT_COMMAND 2>/dev/null)\" in\n"
+             "  \"declare -a\"*) [[ \" ${PROMPT_COMMAND[*]} \" == *\" __deepfetch_prompt \"* ]] || PROMPT_COMMAND=(__deepfetch_prompt \"${PROMPT_COMMAND[@]}\") ;;\n"
+             "  *) [[ \"$PROMPT_COMMAND\" == *__deepfetch_prompt* ]] || PROMPT_COMMAND=\"__deepfetch_prompt${PROMPT_COMMAND:+;$PROMPT_COMMAND}\" ;;\n"
+             "esac\n"
              "clear() { deepfetch --clear; }\n"
              "bind -x '\"\\C-l\": deepfetch --clear'");
     } else if (sh == "zsh") {
@@ -2219,6 +2229,8 @@ static int print_init(const string& sh) {
              "autoload -Uz add-zsh-hook\n"
              "deepfetch-release() { deepfetch --release }\n"
              "add-zsh-hook preexec deepfetch-release\n"
+             "deepfetch-prompt() { deepfetch --prompt }\n"
+             "add-zsh-hook precmd deepfetch-prompt\n"
              "clear() { deepfetch --clear }\n"
              "deepfetch-clear-widget() { deepfetch --clear; zle reset-prompt }\n"
              "zle -N deepfetch-clear-widget\n"
@@ -2295,6 +2307,18 @@ int main(int argc, char** argv) {
         else printf("Интеграция добавлена в %s. Откройте новый терминал или выполните: %s\n", rc_path(sh).c_str(), source_hint(sh).c_str());
         return 0;
     }
+    if (arg == "--prompt") {
+        string sp = state_path();
+        pid_t p = 0;
+        int h = 0;
+        if (sp.empty() || !read_state(sp, p, h) || !is_ours(p)) return 0;
+        int r = query_cursor_row();
+        if (r > 0) {
+            std::ofstream f(sp + ".row", std::ios::trunc);
+            f << r << "\n";
+        }
+        return 0;
+    }
     if (arg != "" && arg != "--stop" && arg != "--static" && arg != "--once" && arg != "--clear" && arg != "--release") {
         fprintf(stderr, "deepfetch: неизвестный параметр %s (см. --help)\n", arg.c_str());
         return 2;
@@ -2309,11 +2333,7 @@ int main(int argc, char** argv) {
             wait_exit(p);
         }
         if (arg == "--release") return 0;
-        if (arg == "--stop") {
-            if (alive) printf("\0337\x1b[r\0338");
-        } else {
-            printf("\x1b[r\x1b[H\x1b[2J\x1b[3J");
-        }
+        if (arg == "--clear") printf("\x1b[r\x1b[H\x1b[2J\x1b[3J");
         fflush(stdout);
         return 0;
     }
@@ -2323,16 +2343,17 @@ int main(int argc, char** argv) {
     detect_caps();
 
     bool interactive = !g_caps.plain && isatty(0) && isatty(1);
-    bool background = interactive && arg == "";
+    bool hooked = !env_or("DEEPFETCH_HOOK").empty();
+    bool background = interactive && arg == "" && hooked;
     pid_t shell_pid = find_shell();
     g_shell_exe = detect_shell_exe();
     int ready_fd = -1;
+    if (interactive && arg == "" && !hooked) first_run_setup();
     if (background) {
-        first_run_setup();
         int r = query_cursor_row();
         if (r > 0) g_top = r - 1;
+        else background = false;
     }
-    bool inline_mode = g_top > 0;
     string spath = state_path();
 
     if (background) {
@@ -2421,7 +2442,7 @@ int main(int argc, char** argv) {
     int need_used = SHELL_ROWS;
     bool fits = false;
     if (background) {
-        for (int need : {SHELL_ROWS, 5, 3}) {
+        for (int need : {SHELL_ROWS, FREEZE_ROWS + 1}) {
             need_used = need;
             fits = choose_layout(st, si, scene, cols, rows, logo.accent, need, L, H);
             if (fits) break;
@@ -2451,6 +2472,8 @@ int main(int argc, char** argv) {
                      rows, H + 3);
             write_all(msg);
         }
+        if (interactive && arg == "" && !hooked)
+            write_all("deepfetch: анимация включится после установки интеграции (deepfetch --setup) и нового терминала\n");
         signal_ready();
         smp.shutdown();
         return 0;
@@ -2465,9 +2488,6 @@ int main(int argc, char** argv) {
     const string SYNC_OFF = g_caps.modern ? "\x1b[?2026l" : "\x1b[?25h";
     pid_t shell_pgrp = getpgid(shell_pid);
 
-    auto region = [&](int h) {
-        return "\0337\x1b[" + std::to_string(g_top + h + 1) + ";" + std::to_string(rows) + "r\0338";
-    };
     auto foreground_ok = [&]() {
         pid_t fg = tcgetpgrp(1);
         return fg < 0 || shell_pgrp < 0 || fg == shell_pgrp;
@@ -2482,20 +2502,14 @@ int main(int argc, char** argv) {
     {
 
         string o = SYNC_ON;
-        int over = g_top + H + need_used - rows;
-        if (inline_mode && over <= g_top) {
-            if (over > 0) {
-                o += "\x1b[" + std::to_string(rows) + ";1H" + string((size_t)over, '\n');
-                g_top -= over;
-            }
-            o += "\x1b[" + std::to_string(g_top + 1) + ";1H";
-        } else {
-            g_top = 0;
-            o.append((size_t)rows, '\n');
-            o += "\x1b[H";
+        int over = std::max(0, g_top + H + need_used - rows);
+        if (over > g_top) over = g_top;
+        if (over > 0) {
+            o += "\x1b[" + std::to_string(rows) + ";1H" + string((size_t)over, '\n');
+            g_top -= over;
         }
+        o += "\x1b[" + std::to_string(g_top + 1) + ";1H";
         o += pres.update(grid);
-        o += "\x1b[" + std::to_string(g_top + H + 1) + ";" + std::to_string(rows) + "r";
         o += "\x1b[" + std::to_string(g_top + H + 1) + ";1H";
         o += SYNC_OFF;
         write_all(o);
@@ -2503,9 +2517,11 @@ int main(int argc, char** argv) {
     write_state(spath, H);
     signal_ready();
 
+    string rowpath = spath.empty() ? "" : spath + ".row";
+    if (!rowpath.empty()) unlink(rowpath.c_str());
+    const int block_end = g_top + H;
     double away_since = 0;
-    bool armed = false, released_by_poll = false, info_dirty = true, resize_pending = false, suspended = false;
-    double resize_t = 0;
+    bool armed = false, released_by_poll = false, info_dirty = true, aborted = false;
     double t_last = now_sec(), next_sample = t_last + SAMPLE_SEC;
     double ema_work = 0.002, fps_cap = fps;
     int async_seen = g_async.version.load();
@@ -2525,7 +2541,6 @@ int main(int argc, char** argv) {
         }
         armed = true;
         away_since = 0;
-        bool resumed = false;
 
         double t = now_sec();
         double dt = std::min(0.25, t - t_last);
@@ -2533,59 +2548,20 @@ int main(int argc, char** argv) {
 
         int c2, r2;
         term_size(c2, r2);
-        string pre;
         if (c2 != cols || r2 != rows) {
-            cols = c2;
-            rows = r2;
-            resize_pending = true;
-            resize_t = t;
+            aborted = true;
+            break;
         }
-        if (resize_pending) {
-            if (t - resize_t < 0.3) {
-                usleep(60000);
-                continue;
+        if (!rowpath.empty()) {
+            int cur = 0;
+            std::ifstream rf(rowpath);
+            if (rf >> cur && cur > 0) {
+                if (cur <= block_end) {
+                    aborted = true;
+                    break;
+                }
+                if (rows - cur < FREEZE_ROWS) break;
             }
-            resize_pending = false;
-            Layout nl = L;
-            int newH = 0;
-            bool ok = false;
-            for (int need : {SHELL_ROWS, 5, 3}) {
-                ok = choose_layout(st, si, scene, cols, rows, logo.accent, need, nl, newH);
-                if (ok) break;
-            }
-            if (!ok) {
-                write_all("\x1b[r\x1b[2J\x1b[H");
-                suspended = true;
-            } else {
-                L = nl;
-                H = newH;
-                g_top = 0;
-                write_state(spath, H);
-                info = build_info(st, si, L, logo.accent);
-                for (Gauge* g : gs) g->snap();
-                compose(scene, spin.R, info, H, L, grid, canvas);
-                pres.invalidate();
-                string o = SYNC_ON + "\x1b[r\x1b[2J\x1b[H";
-                o += pres.update(grid);
-                o += "\x1b[" + std::to_string(H + 1) + ";" + std::to_string(rows) + "r";
-                o += "\x1b[" + std::to_string(H + 1) + ";1H";
-                o += SYNC_OFF;
-                write_all(o);
-                suspended = false;
-                info_dirty = false;
-            }
-            kill(shell_pid, SIGWINCH);
-            t_last = now_sec();
-            continue;
-        }
-        if (suspended) {
-            usleep(150000);
-            t_last = now_sec();
-            continue;
-        }
-        if (resumed) {
-            pre += region(H);
-            pres.invalidate();
         }
 
         spin.step(dt);
@@ -2610,18 +2586,10 @@ int main(int argc, char** argv) {
         double w0 = now_sec();
         if (info_dirty) {
             info = build_info(st, si, L, logo.accent);
-            int newH = std::max(scene.CH, (int)info.size());
-            if (newH != H) {
-                for (int y = 0; y < std::max(H, newH); y++) pre += Pinned::cup(y, 0) + "\x1b[2K";
-                H = newH;
-                write_state(spath, H);
-                pre += region(H);
-                pres.invalidate();
-            }
             info_dirty = false;
         }
         compose(scene, spin.R, info, H, L, grid, canvas);
-        write_all(SYNC_ON + pre + pres.update(grid) + SYNC_OFF);
+        write_all(SYNC_ON + pres.update(grid) + SYNC_OFF);
         double w = now_sec() - w0;
         ema_work = ema_work * 0.8 + w * 0.2;
         fps_cap = std::max(FPS_MIN, std::min(fps, 1.0 / (ema_work * 3.0)));
@@ -2631,14 +2599,13 @@ int main(int argc, char** argv) {
         if (wait > 0) usleep((useconds_t)(wait * 1e6));
     }
 
-    if (released_by_poll) {
-        write_all("\0337\x1b[r\0338");
-    } else if (!g_write_failed && (g_release || foreground_ok())) {
+    if (!released_by_poll && !aborted && !g_write_failed) {
         for (Gauge* g : gs) g->snap();
         info = build_info(st, si, L, logo.accent);
         compose(scene, identity(), info, H, L, grid, canvas);
-        write_all(SYNC_ON + pres.update(grid) + "\0337\x1b[r\0338" + SYNC_OFF);
+        write_all(SYNC_ON + pres.update(grid) + SYNC_OFF);
     }
+    if (!rowpath.empty()) unlink(rowpath.c_str());
     remove_state(spath);
     smp.shutdown();
     return 0;
